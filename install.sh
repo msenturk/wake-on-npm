@@ -647,8 +647,10 @@ run_install() {
     local npm_db="./data/database.sqlite"
     if [ -f "$npm_db" ]; then
         local npm_cid
-        npm_cid=$(docker compose ps -q app 2>/dev/null \
-               || docker compose ps -q nginx-proxy-manager 2>/dev/null || true)
+        npm_cid=$(docker compose ps -q app 2>/dev/null || true)
+        [ -z "$npm_cid" ] && npm_cid=$(docker compose ps -q nginx-proxy-manager 2>/dev/null || true)
+        [ -z "$npm_cid" ] && npm_cid=$(docker ps -q -f "name=nginx-proxy-manager" 2>/dev/null | head -n1)
+        [ -z "$npm_cid" ] && npm_cid=$(docker ps -q -f "ancestor=jc21/nginx-proxy-manager" 2>/dev/null | head -n1)
         if [ -n "$npm_cid" ]; then
             local cleaned
             cleaned=$(docker exec "$npm_cid" sqlite3 /data/database.sqlite \
