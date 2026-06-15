@@ -406,6 +406,14 @@ class NpmDatabase:
         self._proxy_hosts: list[dict] = []  # [{domain_names, forward_host, forward_port}]
         self._fetched = False
 
+    def _query_at(self, db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
+        """Run SQL directly against a local SQLite file."""
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                return conn.execute(sql, params).fetchall()
+        except Exception:
+            return []
+
     def _local_db(self) -> Optional[Path]:
         p = self._target / "data" / "database.sqlite"
         return p if p.exists() else None
@@ -414,26 +422,84 @@ class NpmDatabase:
         db = self._local_db()
         if not db:
             return []
+        return self._query_at(db, sql, params)
+
+    def _find_npm_db_via_inspect(self, npm_cid: str) -> Optional[Path]:
+        """Inspect the NPM container to find its /data bind-mount host path.
+
+        This is the most portable strategy — it reads the DB file directly
+        from the host filesystem without needing any tools inside the container.
+        Works with Docker, Podman, rootless, rootful.
+        """
+        out = self._docker.run(["inspect", "--format", "{{json .Mounts}}", npm_cid])
+        if not out:
+            return None
         try:
-            with sqlite3.connect(str(db)) as conn:
-                return conn.execute(sql, params).fetchall()
+            mounts = json.loads(out.strip())
+            for m in mounts:
+                dest = m.get("Destination") or m.get("destination") or ""
+                src  = m.get("Source")      or m.get("source")      or ""
+                if dest == "/data" and src:
+                    for candidate in (
+                        Path(src) / "database.sqlite",
+                        Path(src) / "data" / "database.sqlite",
+                    ):
+                        if candidate.exists():
+                            return candidate
         except Exception:
-            return []
+            pass
+        return None
 
     def _exec_query(self, npm_cid: str, sql: str) -> list[tuple]:
-        """Run SQL inside the NPM container."""
+        """Run SQL against the NPM database via container exec.
+
+        Tries in order:
+          1. python3 inside the NPM container
+          2. sqlite3 CLI inside the NPM container
+          3. Throwaway Alpine container with --volumes-from (named-volume fallback)
+        """
+        sep = "\x1e"  # ASCII Record Separator — never appears in SQL text output
+
+        # Strategy 1: python3 (present in jc21/nginx-proxy-manager images)
         py_cmd = (
-            "import sqlite3,json; conn=sqlite3.connect('/data/database.sqlite'); "
+            "import sqlite3,sys; conn=sqlite3.connect('/data/database.sqlite'); "
             f"rows=conn.execute({sql!r}).fetchall(); "
-            "[print('||'.join(str(c) for c in r)) for r in rows]"
+            "[sys.stdout.write('\x1e'.join(str(c) for c in r) + '\n') for r in rows]"
         )
         out = self._docker.run_exec(npm_cid, ["python3", "-c", py_cmd])
-        if not out:
+        if out and out.strip():
+            return [tuple(line.split(sep)) for line in out.split("\n") if line.strip()]
+
+        # Strategy 2: sqlite3 CLI inside the NPM container (Alpine-based images)
+        out2 = self._docker.run_exec(
+            npm_cid, ["sh", "-c", f"sqlite3 -separator '\x1e' /data/database.sqlite \"{sql}\""]
+        )
+        if out2 and out2.strip():
+            return [tuple(line.split(sep)) for line in out2.split("\n") if line.strip()]
+
+        # Strategy 3: throwaway Alpine container with --volumes-from
+        #   Used when the DB is in a named Docker volume (no host path).
+        return self._query_via_temp_container(npm_cid, sql, sep)
+
+    def _query_via_temp_container(self, npm_cid: str, sql: str, sep: str = "\x1e") -> list[tuple]:
+        """Spin up a minimal Alpine container with --volumes-from <npm_cid> and run sqlite3."""
+        if not self._docker.available:
             return []
-        rows = []
-        for line in out.strip().splitlines():
-            rows.append(tuple(line.split("||")))
-        return rows
+        cmd = self._docker._cmd + [
+            "run", "--rm",
+            "--volumes-from", npm_cid,
+            "alpine:3.20",
+            "sh", "-c",
+            f"apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 -separator '{sep}' /data/database.sqlite \"{sql}\"",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            out = result.stdout
+            if out and out.strip():
+                return [tuple(line.split(sep)) for line in out.split("\n") if line.strip()]
+        except Exception:
+            pass
+        return []
 
     def _exec_write(self, npm_cid: str, sql: str) -> int:
         py_cmd = (
@@ -441,10 +507,23 @@ class NpmDatabase:
             f"cur=conn.execute({sql!r}); conn.commit(); print(cur.rowcount)"
         )
         out = self._docker.run_exec(npm_cid, ["python3", "-c", py_cmd])
+        if out and out.strip():
+            try:
+                return int(out.strip())
+            except ValueError:
+                pass
+        # Fallback: sqlite3 CLI
+        out2 = self._docker.run_exec(
+            npm_cid,
+            ["sh", "-c", f"sqlite3 /data/database.sqlite \"{sql}; SELECT changes();\""]
+        )
         try:
-            return int(out.strip())
-        except ValueError:
-            return 0
+            return int(out2.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            pass
+        # Fallback: temp Alpine container
+        rows = self._query_via_temp_container(npm_cid, sql)
+        return len(rows)  # rowcount not recoverable this way, but > 0 means success
 
     def fetch(self) -> None:
         if self._fetched:
@@ -454,15 +533,37 @@ class NpmDatabase:
         sql = "SELECT domain_names, forward_host, forward_port FROM proxy_host WHERE is_deleted=0"
 
         rows: list[tuple] = []
+
         if npm_cid:
-            rows = self._exec_query(npm_cid, sql)
+            # Strategy 0: read DB directly from the host path found via container inspect.
+            # Most reliable — no tools required inside the NPM container.
+            db_path = self._find_npm_db_via_inspect(npm_cid)
+            if db_path:
+                Console.info(f"Reading NPM database from {db_path}")
+                rows = self._query_at(db_path, sql)
+
+            # Fallback: exec strategies (needed when DB is in a named Docker volume)
+            if not rows:
+                rows = self._exec_query(npm_cid, sql)
+
+            if not rows:
+                Console.warn(
+                    "Could not read NPM database from container — "
+                    "domain auto-detection will be skipped."
+                )
+                Console.info(
+                    "  Tip: run the installer from your NPM data directory "
+                    "(the one containing data/database.sqlite), "
+                    "or pass --path /path/to/npm-data."
+                )
+
         if not rows:
             rows = self._query_local(sql)
 
         self._proxy_hosts = [
             {"domain_names": r[0], "forward_host": str(r[1]), "forward_port": str(r[2])}
             for r in rows
-            if r
+            if len(r) >= 3
         ]
 
     def find_config_for(

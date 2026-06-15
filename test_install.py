@@ -602,6 +602,78 @@ class TestNpmDatabase:
         db._proxy_hosts = []
         assert db.find_config_for("any", [], []) is None
 
+    def test_find_npm_db_via_inspect_bind_mount(self, tmp_dir):
+        """Strategy 0: find DB via docker inspect mount list (bind mount)."""
+        db_file = tmp_dir / "database.sqlite"
+        db_file.write_bytes(b"")  # just needs to exist
+        mounts_json = json.dumps([{
+            "Type": "bind",
+            "Source": str(tmp_dir),
+            "Destination": "/data",
+        }])
+        docker = MagicMock()
+        docker.available = True
+        docker.run.return_value = mounts_json
+        db = I.NpmDatabase(docker, tmp_dir)
+        result = db._find_npm_db_via_inspect("npm_cid")
+        assert result == db_file
+
+    def test_find_npm_db_via_inspect_nested(self, tmp_dir):
+        """Strategy 0: also tries <src>/data/database.sqlite for nested layouts."""
+        nested = tmp_dir / "data"
+        nested.mkdir()
+        db_file = nested / "database.sqlite"
+        db_file.write_bytes(b"")
+        mounts_json = json.dumps([{
+            "Type": "bind",
+            "Source": str(tmp_dir),
+            "Destination": "/data",
+        }])
+        docker = MagicMock()
+        docker.available = True
+        docker.run.return_value = mounts_json
+        db = I.NpmDatabase(docker, tmp_dir)
+        result = db._find_npm_db_via_inspect("npm_cid")
+        assert result == db_file
+
+    def test_find_npm_db_via_inspect_no_data_mount(self, tmp_dir):
+        """Strategy 0: returns None if /data mount is absent."""
+        mounts_json = json.dumps([{
+            "Type": "bind",
+            "Source": str(tmp_dir),
+            "Destination": "/other",
+        }])
+        docker = MagicMock()
+        docker.available = True
+        docker.run.return_value = mounts_json
+        db = I.NpmDatabase(docker, tmp_dir)
+        assert db._find_npm_db_via_inspect("npm_cid") is None
+
+    def test_find_npm_db_via_inspect_invalid_json(self, tmp_dir):
+        """Strategy 0: returns None on bad inspect output."""
+        docker = MagicMock()
+        docker.available = True
+        docker.run.return_value = "not json"
+        db = I.NpmDatabase(docker, tmp_dir)
+        assert db._find_npm_db_via_inspect("npm_cid") is None
+
+    def test_fetch_uses_inspect_first(self, tmp_dir, sqlite_db):
+        """Strategy 0 fires before exec strategies in fetch()."""
+        mounts_json = json.dumps([{
+            "Type": "bind",
+            "Source": str(tmp_dir / "data"),
+            "Destination": "/data",
+        }])
+        docker = MagicMock()
+        docker.available = True
+        docker.find_npm_container.return_value = "npm_cid"
+        docker.run.return_value = mounts_json  # inspect returns the mount
+        # run_exec should NOT be called if inspect succeeds
+        db = I.NpmDatabase(docker, tmp_dir)
+        db.fetch()
+        docker.run_exec.assert_not_called()
+        assert len(db._proxy_hosts) >= 1
+
     def test_count_old_snippets_local(self, tmp_dir, sqlite_db):
         docker = MagicMock()
         docker.available = False
@@ -638,7 +710,7 @@ class TestNpmDatabase:
         docker = MagicMock()
         docker.available = True
         docker.find_npm_container.return_value = "npm_cid"
-        docker.run_exec.return_value = '["myapp.example.com"]||myapp||8080\n'
+        docker.run_exec.return_value = '["myapp.example.com"]' + "\x1e" + "myapp" + "\x1e" + "8080\n"
         db = I.NpmDatabase(docker, tmp_dir)
         db.fetch()
         assert len(db._proxy_hosts) == 1
@@ -674,6 +746,75 @@ class TestNpmDatabase:
         result = db.find_config_for("plain", [], [])
         assert result is not None
         assert result["domain"] == "plain.example.com"
+
+    def test_exec_query_falls_back_to_temp_container(self, tmp_dir):
+        """When python3 and sqlite3 both fail, a temp Alpine container is tried."""
+        docker = MagicMock()
+        docker.available = True
+        docker._cmd = ["docker"]
+        docker.run_exec.return_value = ""  # python3 and sqlite3 both fail
+        db = I.NpmDatabase(docker, tmp_dir)
+
+        sep = "\x1e"
+        # Only intercept the subprocess.run call made by _query_via_temp_container
+        row = '["app.example.com"]' + sep + "myapp" + sep + "8080"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(stdout=row + "\n", returncode=0)
+            rows = db._exec_query("npm_cid", "SELECT 1")
+
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert "run" in call_args
+        assert "--rm" in call_args
+        assert "--volumes-from" in call_args
+        assert "alpine:3.20" in call_args
+        assert len(rows) == 1
+        assert rows[0] == ('["app.example.com"]', "myapp", "8080")
+
+    def test_exec_query_temp_container_subprocess_error(self, tmp_dir):
+        """If the temp container fails too, return empty list gracefully."""
+        docker = MagicMock()
+        docker.available = True
+        docker._cmd = ["docker"]
+        docker.run_exec.return_value = ""
+        db = I.NpmDatabase(docker, tmp_dir)
+
+        with patch("subprocess.run", side_effect=Exception("docker not available")):
+            rows = db._exec_query("npm_cid", "SELECT 1")
+        assert rows == []
+
+    def test_fetch_warns_when_exec_fails(self, tmp_dir, capsys):
+        """fetch() should warn when NPM container DB is unreadable."""
+        docker = MagicMock()
+        docker.available = True
+        docker.find_npm_container.return_value = "npm_cid"
+        docker._cmd = ["docker"]
+        docker.run_exec.return_value = ""
+        db = I.NpmDatabase(docker, tmp_dir)
+
+        with patch("subprocess.run", side_effect=Exception("no docker")):
+            db.fetch()
+
+        out = capsys.readouterr().out
+        assert "Could not read NPM database" in out or "Tip" in out
+
+    def test_fetch_exec_uses_record_separator_not_pipe(self, tmp_dir):
+        """Exec output uses \\x1e not || so domain_names JSON with || won't break parsing."""
+        docker = MagicMock()
+        docker.available = True
+        docker.find_npm_container.return_value = "npm_cid"
+        docker._cmd = ["docker"]
+        sep = "\x1e"
+        # Return a properly separated row for the python3 strategy (first run_exec call)
+        docker.run_exec.return_value = (
+            '["app.example.com","www.app.example.com"]' + sep + "myapp" + sep + "8080\n"
+        )
+        db = I.NpmDatabase(docker, tmp_dir)
+        db.fetch()
+        assert len(db._proxy_hosts) == 1
+        assert db._proxy_hosts[0]["forward_host"] == "myapp"
+        assert db._proxy_hosts[0]["forward_port"] == "8080"
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
