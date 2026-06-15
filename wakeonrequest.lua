@@ -557,33 +557,22 @@ function _M.wake(name, opts)
     local state = data.State and data.State.Status
     touch(name)
 
-    -- ── Handle Cold Start ───────────────────────────────────────────────────
-    if state ~= "running" then
-        local lock_key = "starting:" .. name
-        local splash_key = "splash:" .. name
-        local dict = ngx.shared[_M.SHARED_DICT]
+    -- ── Handle Cold Start / Startup Wait ────────────────────────────────────
+    local lock_key = "starting:" .. name
+    local splash_key = "splash:" .. name
+    local dict = ngx.shared[_M.SHARED_DICT]
 
-        -- Determine if we should show the splash page
-        local splash_enabled = true
-        if opts and opts.splash ~= nil then
-            splash_enabled = (opts.splash == true)
-        end
+    local splash_enabled = true
+    if opts and opts.splash ~= nil then
+        splash_enabled = (opts.splash == true)
+    end
 
-        -- Check if someone else is already handling splash page
-        if splash_enabled and shared_get(splash_key) then
-            render_splash(name)
-            ngx.exit(ngx.HTTP_OK)
-            return
-        end
-
-        -- Use shared dict as a mutex to prevent thundering herd
-        if dict and dict:add(lock_key, true, start_timeout + 5) then
-            -- Winner: mark that we are showing splash to others
+    if state ~= "running" or shared_get(splash_key) then
+        -- Only the first request triggers the actual 'docker start' command
+        if state ~= "running" and dict and dict:add(lock_key, true, start_timeout + 5) then
             if splash_enabled then shared_set(splash_key, true, start_timeout + 10) end
-
             local ok, start_err = start_container(name)
             if not ok then
-                -- CRITICAL: Release locks and log if Docker fails to start the container
                 shared_del(lock_key)
                 shared_del(splash_key)
                 ngx.log(ngx.ERR, "[wakeonrequest] docker start failed for '", name, "': ", start_err)
@@ -593,21 +582,18 @@ function _M.wake(name, opts)
             ngx.sleep(0.5)
         end
 
-        -- Everyone (winner and losers) waits for readiness
+        -- Everyone (first request AND subsequent splash reloads) waits for readiness
         local wait_limit = splash_enabled and 0.5 or start_timeout
-        local poll_interval = nil
-        if opts and opts.poll_interval then poll_interval = tonumber(opts.poll_interval) end
-
+        local poll_interval = opts and tonumber(opts.poll_interval) or nil
         local ready, wait_err = wait_until_ready(name, wait_limit, detected_port, target_ip, poll_interval)
 
         if not ready then
             if splash_enabled then
-                -- Still serve splash (locks stay to prevent re-starts)
+                -- Still serve splash; user's browser will auto-refresh and hit this again
                 render_splash(name)
                 ngx.exit(ngx.HTTP_OK)
                 return
             end
-            -- Timeout/Error path
             shared_del(lock_key)
             shared_del(splash_key)
             ngx.log(ngx.ERR, "[wakeonrequest] '", name, "' did not become ready: ", wait_err)
