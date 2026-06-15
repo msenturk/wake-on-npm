@@ -532,7 +532,9 @@ function _M.wake(name, opts)
     end
 
     local target_ip = nil
-    if data.NetworkSettings and data.NetworkSettings.Networks then
+    if data.Config and data.Config.Labels and data.Config.Labels["wakeonrequest.probe_host"] then
+        target_ip = data.Config.Labels["wakeonrequest.probe_host"]
+    elseif data.NetworkSettings and data.NetworkSettings.Networks then
         for _, net in pairs(data.NetworkSettings.Networks) do
             if net.IPAddress and net.IPAddress ~= "" then
                 target_ip = net.IPAddress; break
