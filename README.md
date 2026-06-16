@@ -43,7 +43,7 @@ chmod +x install.sh
 # 1. Target a specific NPM directory
 ./install.sh /path/to/nginx-proxy-manager
 
-# 2. Preview proposed changes and container setup without writing files
+# 2. Preview proposed changes, verify GitHub file versions, and check container setup
 ./install.sh --dry-run
 
 # 3. Manually specify the NPM container name or ID
@@ -110,12 +110,12 @@ set $wake_splash         "true";               # Optional: Show loading page (de
 | Option | Nginx Variable | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `wakeonrequest.enable` | - | - | Set to `true` to opt-in the container for management. |
-| `wakeonrequest.domain` | - | - | Comma-separated domains mapped to this container. |
+| `wakeonrequest.domain` | - | - | Comma-separated domains mapped to this container (automatically falls back to root domains for subdomains like `www.`). |
 | `wakeonrequest.idle_timeout` | `$wake_idle_timeout` | `300` | Inactivity duration in seconds before stopping the container. |
 | `wakeonrequest.start_timeout` | `$wake_start_timeout` | `30` | Maximum seconds to wait for readiness probes on startup. |
 | `wakeonrequest.probe_host` | `$wake_probe_host` | *Container name* | Target hostname/IP for TCP connectivity readiness check. |
 | `wakeonrequest.port` | `$wake_port` | *Exposed port* | Port number for the TCP connectivity readiness check. |
-| - | `$wake_splash` | `"true"` | Set to `"false"` to disable showing the waking-up splash screen. |
+| - | `$wake_splash` | `"true"` | Set to `"false"` to disable showing the waking-up splash screen (returns a 503 Retry-After response instead). |
 | - | `$wake_timer_interval` | `60` | Background loop check frequency for idle containers. |
 | - | `$wake_poll_interval` | `0.5` | Readiness probe retry interval during container startup. |
 

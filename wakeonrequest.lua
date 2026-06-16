@@ -48,6 +48,7 @@ _M.DEFAULT_IDLE     = 600    -- seconds idle before auto-stop
 _M.DEFAULT_START    = 30     -- seconds to wait for container ready
 _M.POLL_INTERVAL    = 0.5    -- seconds between readiness polls
 _M.TIMER_INTERVAL   = 60     -- seconds between idle checks
+_M.ALIVE_TTL        = 30     -- seconds to trust "container is up" without Docker API
 _M.SHARED_DICT      = "wakeonrequest_state"
 
 -- Label that opts a container in to wakeonrequest management
@@ -270,12 +271,14 @@ local function docker_request(method, path, body, timeout)
         while true do
             local chunk_len_str = sock:receive("*l")
             if not chunk_len_str then break end
-            local chunk_len = tonumber(chunk_len_str:match("^(%x+)"), 16)
+            local match_res = chunk_len_str:match("^(%x+)")
+            local chunk_len = match_res and tonumber(match_res, 16) or nil
             if not chunk_len or chunk_len == 0 then break end
             
             local chunk_data = sock:receive(chunk_len)
             if chunk_data then table.insert(chunks, chunk_data) end
-            sock:receive(2) -- read trailing \r\n
+            local _, recv_err = sock:receive(2) -- read trailing \r\n
+            if recv_err then break end
         end
         resp = table.concat(chunks)
     elseif len and len > 0 then
@@ -317,7 +320,11 @@ end
 local function discover_managed_containers()
     -- Use Docker API filter to only fetch containers with our enable label.
     -- This is much more efficient than fetching all containers.
-    local filter = json.encode({ label = { [_M.LABEL_ENABLE .. "=true"] = true } })
+    local filter, ferr = json.encode({ label = { [_M.LABEL_ENABLE .. "=true"] = true } })
+    if not filter then
+        ngx.log(ngx.ERR, "[wakeonrequest] JSON encode failed: ", ferr)
+        return nil, ferr
+    end
     local path = "/containers/json?all=1&filters=" .. ngx.escape_uri(filter)
 
     local code, body, err = docker_request("GET", path)
@@ -351,7 +358,11 @@ end
 
 local function stop_container(name)
     local code, _, err = docker_request("POST", "/containers/" .. name .. "/stop?t=10", nil, 20000)
-    return (code == 204 or code == 304), err
+    if code == 204 or code == 304 then
+        shared_del("alive:" .. name)
+        return true, nil
+    end
+    return false, err
 end
 
 -- ── Readiness poll ────────────────────────────────────────────────────────────
@@ -362,12 +373,19 @@ end
 -- @param target_port string (optional): Port to probe for TCP connectivity
 -- @param hint_ip string (optional): Previously known IP to prefer over DNS
 -- @return boolean, err string|nil
-local function wait_until_ready(name, start_timeout, target_port, hint_ip, poll_interval)
+local function wait_until_ready(name, start_timeout, target_port, hint_ip, poll_interval, initial_data)
     local timeout  = start_timeout or _M.DEFAULT_START
     local deadline = ngx.now() + timeout
+    local current_data = initial_data
 
     while ngx.now() < deadline do
-        local data, err = inspect(name)
+        local data, err
+        if current_data then
+            data = current_data
+            current_data = nil
+        else
+            data, err = inspect(name)
+        end
         if not err and data and data.State then
             local st = data.State.Status
             if st == "running" then
@@ -390,8 +408,11 @@ local function wait_until_ready(name, start_timeout, target_port, hint_ip, poll_
                     sock:settimeout(500)
                     -- Prefer known IP (hint or discovered) over DNS name
                     local probe_host = hint_ip or ip or name
-                    local pok, _ = sock:connect(probe_host, target_port)
-                    if pok then sock:close(); return true end
+                    local port_num = tonumber(tostring(target_port):match("^(%d+)")) or tonumber(target_port)
+                    if port_num then
+                        local pok, _ = sock:connect(probe_host, port_num)
+                        if pok then sock:close(); return true end
+                    end
                 elseif healthy then return true end
             elseif st == "exited" or st == "dead" then return false, "exited" end
         end
@@ -429,7 +450,7 @@ end
 -- ── Idle-stop timer ───────────────────────────────────────────────────────────
 
 local function schedule_check(name, idle_timeout, timer_interval)
-    ngx.timer.at(timer_interval or _M.TIMER_INTERVAL, function(premature)
+    local ok, timer_err = ngx.timer.at(timer_interval or _M.TIMER_INTERVAL, function(premature)
         if premature or not shared_get("timer_active:" .. name) then return end
         local state, state_err = get_state(name)
         if not state_err and state == "running" then
@@ -442,12 +463,16 @@ local function schedule_check(name, idle_timeout, timer_interval)
                 else
                     shared_del("seen:" .. name)
                     shared_del("timer_active:" .. name)
+                    ngx.log(ngx.INFO, "[wakeonrequest] timer chain ended for '", name, "'")
                     return
                 end
             end
         end
         schedule_check(name, idle_timeout, timer_interval)
     end)
+    if not ok then
+        ngx.log(ngx.ERR, "[wakeonrequest] failed to schedule timer for '", name, "': ", timer_err)
+    end
 end
 
 -- Background worker that monitors a single container for inactivity.
@@ -505,6 +530,14 @@ function _M.auto_start_timers()
                 end
             end
 
+            -- 4. Cleanup timers for removed containers
+            for name in pairs(registered) do
+                if not tracked[name] then
+                    registered[name] = nil
+                    shared_del("timer_active:" .. name)
+                end
+            end
+
             ngx.sleep(_M.RESCAN_INTERVAL)
         end
     end)
@@ -523,6 +556,21 @@ function _M.wake(name, opts)
         name = ngx.var.forward_host or ngx.var.server or host
     end
     if not name or name == "" then ngx.exit(500); return end
+
+    -- Clean up the 'retry' query parameter early
+    -- to prevent it from leaking into error pages or other middleware
+    local args = ngx.req.get_uri_args()
+    if args.retry then
+        args.retry = nil
+        ngx.req.set_uri_args(args)
+    end
+
+    -- ── HOT PATH: container known-good, skip Docker entirely ────────────────
+    local alive_key = "alive:" .. name
+    if shared_get(alive_key) then
+        touch(name)                -- still update idle timer
+        return                     -- ← exits access phase, nginx proxies normally
+    end
 
     -- Core optimization: single inspect call
     local data, inspect_err = inspect(name)
@@ -578,9 +626,15 @@ function _M.wake(name, opts)
     local state = data.State and data.State.Status
     touch(name)
 
+    -- ── If already running, set the alive TTL and return fast next time ──────
+    local splash_key = "splash:" .. name
+    if state == "running" and not shared_get(splash_key) then
+        shared_set(alive_key, true, _M.ALIVE_TTL)
+        return
+    end
+
     -- ── Handle Cold Start / Startup Wait ────────────────────────────────────
     local lock_key = "starting:" .. name
-    local splash_key = "splash:" .. name
     local dict = ngx.shared[_M.SHARED_DICT]
 
     local splash_enabled = true
@@ -590,8 +644,8 @@ function _M.wake(name, opts)
 
     if state ~= "running" or shared_get(splash_key) then
         -- Only the first request triggers the actual 'docker start' command
-        if state ~= "running" and dict and dict:add(lock_key, true, start_timeout + 5) then
-            if splash_enabled then shared_set(splash_key, true, start_timeout + 10) end
+        if state ~= "running" and dict and dict:add(lock_key, true, start_timeout + 30) then
+            if splash_enabled then shared_set(splash_key, true, start_timeout + 30) end
             local ok, start_err = start_container(name)
             if not ok then
                 shared_del(lock_key)
@@ -600,13 +654,15 @@ function _M.wake(name, opts)
                 ngx.exit(ngx.HTTP_SERVICE_UNAVAILABLE)
                 return
             end
+            -- Renew the lock TTL to cover the full wait window
+            shared_set(lock_key, true, start_timeout + 10)
             ngx.sleep(0.5)
         end
 
         -- Everyone (first request AND subsequent splash reloads) waits for readiness
         local wait_limit = splash_enabled and 0.5 or start_timeout
         local poll_interval = opts and tonumber(opts.poll_interval) or nil
-        local ready, wait_err = wait_until_ready(name, wait_limit, detected_port, target_ip, poll_interval)
+        local ready, wait_err = wait_until_ready(name, wait_limit, detected_port, target_ip, poll_interval, data)
 
         if not ready then
             if splash_enabled then
@@ -618,6 +674,7 @@ function _M.wake(name, opts)
             shared_del(lock_key)
             shared_del(splash_key)
             ngx.log(ngx.ERR, "[wakeonrequest] '", name, "' did not become ready: ", wait_err)
+            ngx.header["Retry-After"] = "5"
             ngx.exit(ngx.HTTP_SERVICE_UNAVAILABLE)
             return
         end
@@ -625,15 +682,6 @@ function _M.wake(name, opts)
         -- Ready! Cleanup locks
         shared_del(lock_key)
         shared_del(splash_key)
-    end
-    -- Clean up the 'retry' query parameter from splash page before final proxying
-    -- to prevent it from leaking into the backend application logs/logic.
-    -- Note: This only runs on the happy path. The splash page handles its own
-    -- retry parameter cleanup via client-side JS redirects.
-    local args = ngx.req.get_uri_args()
-    if args.retry then
-        args.retry = nil
-        ngx.req.set_uri_args(args)
     end
 
     ngx.log(ngx.INFO, "[wakeonrequest] '", name, "' ready")
@@ -647,19 +695,42 @@ function _M.global_wake()
         local host = ngx.var.host
         if host then
             name = shared_get("domain:" .. host)
+            if not name then
+                local root_domain = host:match("^[^.]+%.(.+)$")
+                if root_domain then
+                    name = shared_get("domain:" .. root_domain)
+                end
+            end
         end
     end
 
     if not name or name == "" then return end -- Not managed by WakeOnRequest
 
+    local function parse_num(v) return (v and v ~= "") and tonumber(v) or nil end
+    local function parse_str(v) return (v and v ~= "") and v or nil end
+
+    -- ── Configuration Options ──
+    -- Unset NGINX variables return "" (empty string) rather than nil.
+    -- If passed directly, tonumber("") evaluates to nil, which silently
+    -- deletes default values when encoded to JSON for the background worker.
+    -- parse_num and parse_str explicitly coerce "" back to nil to ensure
+    -- safe fallbacks downstream.
+    --
+    -- idle_timeout:   Seconds container must be idle before stopping.
+    -- start_timeout:  Max wait time (seconds) for container to start.
+    -- timer_interval: Background worker check frequency (seconds).
+    -- poll_interval:  TCP ping frequency during startup (seconds).
+    -- splash:         Whether to show the loading animation page.
+    -- probe_host:     Target IP for TCP readiness probe.
+    -- port:           Target port for TCP readiness probe.
     local opts = {
-        idle_timeout = ngx.var.wake_idle_timeout,
-        start_timeout = ngx.var.wake_start_timeout,
-        timer_interval = ngx.var.wake_timer_interval,
-        poll_interval = ngx.var.wake_poll_interval,
+        idle_timeout = parse_num(ngx.var.wake_idle_timeout),
+        start_timeout = parse_num(ngx.var.wake_start_timeout),
+        timer_interval = parse_num(ngx.var.wake_timer_interval),
+        poll_interval = parse_num(ngx.var.wake_poll_interval),
         splash = (ngx.var.wake_splash ~= "false"),
-        probe_host = ngx.var.wake_probe_host,
-        port = ngx.var.wake_port
+        probe_host = parse_str(ngx.var.wake_probe_host),
+        port = parse_str(ngx.var.wake_port)
     }
 
     _M.wake(name, opts)
