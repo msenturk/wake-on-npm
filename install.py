@@ -1375,8 +1375,12 @@ def _prompt(msg: str, default: str = "") -> str:
     try:
         answer = input(msg).strip()
         return answer if answer else default
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
+        print()
         return default
+    except KeyboardInterrupt:
+        print("\nAborted by user.")
+        sys.exit(1)
 
 
 # ── Installation ───────────────────────────────────────────────────────────────
