@@ -1487,9 +1487,9 @@ class TestRunInstall:
 
             I.run_install(args, docker, db)
 
-        assert (tmp_dir / "wakeonrequest.lua").exists()
-        assert (tmp_dir / "npm-custom" / "http_top.conf").exists()
-        assert (tmp_dir / "npm-custom" / "server_proxy.conf").exists()
+        assert (I.SCRIPT_DIR / "wakeonrequest.lua").exists()
+        assert (I.SCRIPT_DIR / "npm-custom" / "http_top.conf").exists()
+        assert (I.SCRIPT_DIR / "npm-custom" / "server_proxy.conf").exists()
 
     def test_install_download_failure(self, tmp_dir, npm_compose, capsys):
         docker = MagicMock()

@@ -37,6 +37,10 @@ REPO = "msenturk/wake-on-request"
 BRANCH = "master"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 
+# Directory where install.py itself lives — used to locate/place script files
+# regardless of where the user runs the script from or what --path is set to.
+SCRIPT_DIR = Path(__file__).parent.resolve()
+
 # local_path → container_path
 FILES: list[tuple[str, str]] = [
     ("wakeonrequest.lua", "/data/nginx/custom/wakeonrequest.lua"),
@@ -1470,18 +1474,19 @@ def run_install(
     db: NpmDatabase,
 ) -> None:
     Console.banner("Wake-On-Request Installer")
-    print(f"  Directory: {Path.cwd()}\n")
+    print(f"  Directory (NPM): {Path.cwd()}")
+    print(f"  Script dir:      {SCRIPT_DIR}\n")
 
     # ── Download files ─────────────────────────────────────────────────────────
     Console.section("Downloading Files")
-    Path("npm-custom").mkdir(parents=True, exist_ok=True)
+    (SCRIPT_DIR / "npm-custom").mkdir(parents=True, exist_ok=True)
 
     # Write bundled server_proxy.conf first
-    _write_bundled_server_proxy(Path("npm-custom/server_proxy.conf"))
+    _write_bundled_server_proxy(SCRIPT_DIR / "npm-custom/server_proxy.conf")
     Console.ok("Bundled   npm-custom/server_proxy.conf (no download needed)")
 
     for local_path, _ in FILES:
-        p = Path(local_path)
+        p = SCRIPT_DIR / local_path
         if local_path == "npm-custom/server_proxy.conf":
             continue  # already written above
 
@@ -1507,10 +1512,20 @@ def run_install(
     # ── Patch docker-compose.yml ───────────────────────────────────────────────
     Console.section("Patching docker-compose.yml")
     patcher = ComposePatcher(Path("docker-compose.yml"))
+
+    # Volume source paths must be relative to the docker-compose.yml location (CWD).
+    # When --path is used, CWD is the NPM dir while script files live in SCRIPT_DIR.
+    try:
+        _vol_base = SCRIPT_DIR.relative_to(Path.cwd())
+    except ValueError:
+        # SCRIPT_DIR is not under CWD — use the absolute path instead
+        _vol_base = SCRIPT_DIR
+
     volumes_needed = [
-        f"./{local_path}:{container_path}"
+        f"{_vol_base}/{local_path}:{container_path}"
         for local_path, container_path in FILES
-        if not patcher.has_volume(f"./{local_path}:{container_path}")
+        if not patcher.has_volume(f"{_vol_base}/{local_path}:{container_path}")
+        and not patcher.has_volume(f"./{local_path}:{container_path}")
     ]
     if not patcher.has_volume(VOL_SOCK):
         volumes_needed.append(VOL_SOCK)
