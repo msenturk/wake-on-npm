@@ -26,6 +26,7 @@ import sys
 import tempfile
 import urllib.request
 import uuid
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -59,8 +60,6 @@ access_by_lua_block {
 class Console:
     """ANSI-colored terminal output helpers."""
 
-    _enabled = sys.stdout.isatty()
-
     _RED    = "\033[0;31m"
     _GREEN  = "\033[0;32m"
     _BLUE   = "\033[0;34m"
@@ -70,7 +69,7 @@ class Console:
 
     @classmethod
     def _c(cls, code: str, text: str) -> str:
-        if cls._enabled:
+        if sys.stdout.isatty():
             return f"{code}{text}{cls._NC}"
         return text
 
@@ -568,7 +567,9 @@ class NpmDatabase:
             pass
         # Fallback: temp Alpine container
         rows = self._query_via_temp_container(npm_cid, sql)
-        return len(rows)  # rowcount not recoverable this way, but > 0 means success
+        if len(rows) > 0:
+            return -1  # rowcount not recoverable this way, but > 0 means success
+        return 0
 
     def fetch(self) -> None:
         if self._fetched:
@@ -993,8 +994,6 @@ def run_dry_run(
                 Console.ok(f"Exists    {local_path}")
             else:
                 try:
-                    import urllib.request
-                    import hashlib
                     # Use local_path directly so nested directories resolve correctly on GitHub
                     url = f"{RAW_BASE}/{local_path}"
                     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -1450,6 +1449,8 @@ def run_install(
     cleaned = db.clear_old_snippets()
     if cleaned is None:
         Console.info("No NPM database found or accessible — skipping cleanup.")
+    elif cleaned == -1:
+        Console.ok("Cleared old Lua snippets (exact count unknown due to fallback DB access).")
     elif cleaned > 0:
         Console.ok(f"Cleared old Lua snippets from {cleaned} proxy host(s).")
     else:
