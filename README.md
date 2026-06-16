@@ -21,25 +21,29 @@ Run these steps in the directory where your Nginx Proxy Manager compose file is 
 Run the script to download the engine files, scan your containers, and inject the global volume mounts into your NPM service definition:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/msenturk/wake-on-request/master/install.sh | bash
+# Download the installer
+curl -O https://raw.githubusercontent.com/msenturk/wake-on-request/master/install.py
+
+# Run interactively (will prompt to configure discovered containers)
+sudo python3 install.py
 ```
 
 Advanced CLI Options:
-If you download the script locally, you can use the following flags:
 
 ```bash
-# Download the installer
-curl -O https://raw.githubusercontent.com/msenturk/wake-on-request/master/install.sh
-chmod +x install.sh
+# Target a specific NPM directory (positional or via --path)
+sudo python3 install.py /path/to/nginx-proxy-manager
+# or
+sudo python3 install.py --path /path/to/nginx-proxy-manager
 
-# Target a specific NPM directory
-./install.sh /path/to/nginx-proxy-manager
-
-# Preview proposed changes, verify GitHub file versions, and check container setup
-./install.sh --dry-run
+# Only configure a specific container (skips prompts for others)
+sudo python3 install.py --container my-app
 
 # Manually specify the NPM container name or ID
-./install.sh --npm my-custom-npm-container
+sudo python3 install.py --npm my-custom-npm-container
+
+# Preview proposed changes without modifying anything
+sudo python3 install.py --dry-run
 ```
 
 ### 2. Apply NPM Changes
