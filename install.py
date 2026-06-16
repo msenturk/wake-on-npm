@@ -927,7 +927,28 @@ def run_dry_run(
                 Console.change(f"Download  {local_path}   ← {RAW_BASE}/{p.name}")
             any_change = True
         else:
-            Console.ok(f"Exists    {local_path}")
+            if local_path == "npm-custom/server_proxy.conf":
+                Console.ok(f"Exists    {local_path}")
+            else:
+                try:
+                    import urllib.request
+                    import hashlib
+                    # Use local_path directly so nested directories resolve correctly on GitHub
+                    url = f"{RAW_BASE}/{local_path}"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        remote_data = resp.read()
+                    # Normalize line endings before hashing to avoid spurious mismatches
+                    remote_data_norm = remote_data.replace(b'\r\n', b'\n')
+                    local_data_norm = p.read_bytes().replace(b'\r\n', b'\n')
+                    
+                    if hashlib.sha256(remote_data_norm).hexdigest() == hashlib.sha256(local_data_norm).hexdigest():
+                        Console.ok(f"Up-to-date  {local_path}")
+                    else:
+                        Console.warn(f"Outdated  {local_path}   ← update available")
+                        any_change = True
+                except Exception:
+                    Console.ok(f"Exists    {local_path}   (could not check remote)")
 
     # ── docker-compose.yml volumes ─────────────────────────────────────────────
     if Path("docker-compose.yml").exists():

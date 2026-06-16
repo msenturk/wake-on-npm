@@ -733,7 +733,27 @@ run_dry_run() {
             fi
             any_change=true
         else
-            ok "Exists    $local_path"
+            if [ "$local_path" = "npm-custom/server_proxy.conf" ]; then
+                ok "Exists    $local_path"
+            else
+                local tmp_dl
+                tmp_dl=$(mktemp)
+                if curl -fsSL "$RAW_BASE/$local_path" -o "$tmp_dl" 2>/dev/null; then
+                    # Normalize line endings to avoid spurious differences
+                    tr -d '\r' < "$local_path" > "${tmp_dl}.local"
+                    tr -d '\r' < "$tmp_dl" > "${tmp_dl}.remote"
+                    if cmp -s "${tmp_dl}.local" "${tmp_dl}.remote"; then
+                        ok "Up-to-date  $local_path"
+                    else
+                        warn "Outdated  $local_path   ← update available"
+                        any_change=true
+                    fi
+                    rm -f "${tmp_dl}.local" "${tmp_dl}.remote"
+                else
+                    ok "Exists    $local_path   (could not check remote)"
+                fi
+                rm -f "$tmp_dl"
+            fi
         fi
     done
 
@@ -1336,7 +1356,7 @@ run_install() {
     for entry in "${FILES[@]}"; do
         local local_path="${entry%%:*}"
         local remote_file="$(basename "$local_path")"
-        local url="$RAW_BASE/$remote_file"
+        local url="$RAW_BASE/$local_path"
 
         # server_proxy.conf is embedded — skip curl for it
         if [ "$local_path" = "npm-custom/server_proxy.conf" ]; then
