@@ -1147,7 +1147,7 @@ def run_dry_run(
             print("     " + Console.green('  - "wakeonrequest.domain=' + label_domain + '"') + "  " + Console.blue('# ← your NPM domain'))
             print("     " + Console.green('  - "wakeonrequest.idle_timeout=300"') + "                  " + Console.blue('# stop after 5 min idle'))
             print("     " + Console.green('  - "wakeonrequest.start_timeout=30"') + "                  " + Console.blue('# wait up to 30s on wake'))
-            if _is_ip(fwd_host):
+            if fwd_host:
                 print("     " + Console.green('  - "wakeonrequest.probe_host=' + fwd_host + '"'))
                 print("     " + Console.green('  - "wakeonrequest.port=' + fwd_port + '"'))
             print()
@@ -1158,9 +1158,9 @@ def run_dry_run(
             print("     " + Console.green('set $wake_container     "' + info.name + '";'))
             print("     " + Console.green('set $wake_idle_timeout  300;'))
             print("     " + Console.green('set $wake_start_timeout 30;'))
-            if _is_ip(fwd_host):
-                print("     " + Console.green('set $wake_probe_host    "' + fwd_host + '";') + "       " + Console.blue('# cross-network probe IP'))
-                print("     " + Console.green('set $wake_port          ' + fwd_port + ';') + "    " + Console.blue('# cross-network probe port'))
+            if fwd_host:
+                print("     " + Console.green('set $wake_probe_host    "' + fwd_host + '";') + "       " + Console.blue('# probe host'))
+                print("     " + Console.green('set $wake_port          ' + fwd_port + ';') + "    " + Console.blue('# probe port'))
             print()
     else:
         Console.warn("Docker socket or daemon not available — skipping container scan.")
@@ -1296,7 +1296,7 @@ def configure_containers(
             f"wakeonrequest.idle_timeout={user_idle}",
             f"wakeonrequest.start_timeout={user_start}",
         ]
-        if _is_ip(fwd_host):
+        if fwd_host:
             labels += [
                 f"wakeonrequest.probe_host={fwd_host}",
                 f"wakeonrequest.port={default_port or '80'}",
@@ -1310,10 +1310,10 @@ def configure_containers(
             print("     " + Console.green('set $wake_container     "' + info.name + '";'))
             print("     " + Console.green('set $wake_idle_timeout  ' + user_idle + ';'))
             print("     " + Console.green('set $wake_start_timeout ' + user_start + ';'))
-            if _is_ip(fwd_host):
+            if fwd_host:
                 probe_port = str(default_port) if default_port else '80'
-                print("     " + Console.green('set $wake_probe_host    "' + fwd_host + '";') + "       " + Console.blue('# cross-network probe IP'))
-                print("     " + Console.green('set $wake_port          ' + probe_port + ';') + "    " + Console.blue('# cross-network probe port'))
+                print("     " + Console.green('set $wake_probe_host    "' + fwd_host + '";') + "       " + Console.blue('# probe host'))
+                print("     " + Console.green('set $wake_port          ' + probe_port + ';') + "    " + Console.blue('# probe port'))
             if info.restart_problematic:
                 Console.warn(f'Remember to change restart to "no" manually for {info.name} if needed')
             continue
