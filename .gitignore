@@ -27,3 +27,4 @@ manual-test/data/
 .serena
 debug_npm_db.sh
 _patch_*.py
+todo.txt

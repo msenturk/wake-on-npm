@@ -956,20 +956,23 @@ class ComposePatcher:
 
     def add_volumes(self, volumes: list[str]) -> bool:
         """
-        Idempotently add volumes under the first 'volumes:' block found under a service.
-        Returns True if any change was made.
+        Idempotently add volumes under the first 'volumes:' block found.
+        Returns True if the file was successfully modified and verified.
         """
-        text = self.path.read_text()
+        try:
+            text = self.path.read_text()
+        except Exception:
+            return False
+
         changed = False
 
         for vol in volumes:
             if vol in text:
                 continue
             # Find first indented volumes: block and insert after it
-            match = re.search(r"([ \t]+volumes:[ \t]*\n)", text)
+            match = re.search(r"^( {2,})volumes:[ \t]*\n", text, re.MULTILINE)
             if match:
-                m = re.match(r"[ \t]*", match.group(1))
-                indent = len(m.group(0)) if m else 0
+                indent = len(match.group(1))
                 vol_indent = " " * (indent + 2)
                 insertion = f"{vol_indent}- {vol}\n"
                 pos = match.end()
@@ -977,7 +980,13 @@ class ComposePatcher:
                 changed = True
 
         if changed:
-            self.path.write_text(text)
+            try:
+                self.path.write_text(text)
+                # Verification pass
+                if volumes[0] not in self.path.read_text():
+                    return False
+            except Exception:
+                return False
         return changed
 
     def add_labels_to_service(
@@ -1621,9 +1630,12 @@ def run_install(
         print(f"      - {VOL_SOCK}")
     else:
         patcher.backup()
-        patcher.add_volumes([VOL_SOCK])
-        Console.ok("docker-compose.yml patched (docker.sock volume added).")
-        compose_patched = True
+        if patcher.add_volumes([VOL_SOCK]):
+            Console.ok("docker-compose.yml patched (docker.sock volume added).")
+            compose_patched = True
+        else:
+            Console.warn("Could not auto-patch docker-compose.yml — add the following volume manually:")
+            print(f"      - {VOL_SOCK}")
 
     # ── Clean NPM database snippets ────────────────────────────────────────────
     Console.section("Cleaning NPM Database")
