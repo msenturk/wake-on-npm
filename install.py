@@ -1336,10 +1336,11 @@ def configure_containers(
     args: argparse.Namespace,
     docker: DockerClient,
     db: NpmDatabase,
-) -> None:
+) -> set[str]:
+    methods_used: set[str] = set()
     if not docker.available:
         Console.warn("Docker socket or daemon not available — skipping app container setup.")
-        return
+        return methods_used
 
     Console.section("App Container Setup")
     db.fetch()
@@ -1420,6 +1421,7 @@ def configure_containers(
             continue
 
         method = "B" if answer == "2" else "A"
+        methods_used.add(method)
 
         # Resolve domain
         if default_domain:
@@ -1525,6 +1527,8 @@ def configure_containers(
     if not any_unmanaged:
         Console.ok("All containers are already configured.")
 
+    return methods_used
+
 
 def _print_manual_snippet(restart: str, labels: list[str]) -> None:
     print()
@@ -1620,8 +1624,9 @@ def run_install(
         Console.ok("No old snippets found — nothing to clean.")
 
     # ── Interactive container setup (interactive terminals only) ───────────────
+    methods_used: set[str] = set()
     if sys.stdin.isatty() and sys.stdout.isatty():
-        configure_containers(args, docker, db)
+        methods_used = configure_containers(args, docker, db)
     else:
         Console.info("Non-interactive environment detected — skipping interactive app configuration.")
 
@@ -1636,20 +1641,23 @@ def run_install(
     _npm_hint = Console.blue('# (use your NPM service name if different from "npm")')
     print(f"     {_npm_hint}")
     print()
-    print(f"  {Console.bold('2.')} If using {Console.bold('Method A')} (Docker Labels), update your app's compose file:")
-    print()
-    _restart = Console.green('restart: "no"')
-    _req = Console.blue('# required — allows idle stop')
-    print(f"     {_restart}                                       {_req}")
-    print(f"     {Console.green('labels:')}")
-    print("       " + Console.green('- "wakeonrequest.enable=true"') + "           " + Console.blue('# required'))
-    print("       " + Console.green('- "wakeonrequest.domain=yourapp.example.com"') + " " + Console.blue('# required'))
-    print("       " + Console.green('- "wakeonrequest.idle_timeout=300"') + "           " + Console.blue('# optional, seconds'))
-    print("       " + Console.green('- "wakeonrequest.start_timeout=30"') + "           " + Console.blue('# optional, seconds'))
-    print()
-    print(f"  {Console.bold('3.')} If using labels, recreate the app container to apply them:")
-    print(f"     {Console.blue('docker compose up -d --force-recreate <your-app-service>')}")
-    print()
+
+    if "A" in methods_used or not methods_used:
+        print(f"  {Console.bold('2.')} If using {Console.bold('Method A')} (Docker Labels), update your app's compose file:")
+        print()
+        _restart = Console.green('restart: "no"')
+        _req = Console.blue('# required — allows idle stop')
+        print(f"     {_restart}                                       {_req}")
+        print(f"     {Console.green('labels:')}")
+        print("       " + Console.green('- "wakeonrequest.enable=true"') + "           " + Console.blue('# required'))
+        print("       " + Console.green('- "wakeonrequest.domain=yourapp.example.com"') + " " + Console.blue('# required'))
+        print("       " + Console.green('- "wakeonrequest.idle_timeout=300"') + "           " + Console.blue('# optional, seconds'))
+        print("       " + Console.green('- "wakeonrequest.start_timeout=30"') + "           " + Console.blue('# optional, seconds'))
+        print()
+        print(f"  {Console.bold('3.')} If using labels, recreate the app container to apply them:")
+        print(f"     {Console.blue('docker compose up -d --force-recreate <your-app-service>')}")
+        print()
+
     print(f"  {Console.bold('4.')} Run dry-run anytime to check status:")
     print(f"     {Console.blue('./install.py --dry-run')}")
     print()
