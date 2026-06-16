@@ -51,7 +51,7 @@ sudo python3 install.py --dry-run
 Restart your NPM stack to load the Wake-On-Request OpenResty plugin. This is only required once during the initial installation.
 
 ```bash
-docker compose up -d --force-recreate npm
+docker compose up -d --force-recreate <npm-service-name>
 ```
 
 ## Phase 2: Container Configuration

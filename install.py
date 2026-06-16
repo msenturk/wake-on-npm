@@ -1659,11 +1659,18 @@ def run_install(
         print(f"  {Console.bold('No further action required.')} Your containers are configured.")
         print()
 
+    # Determine actual NPM service name for output
+    npm_service = "npm"
+    if docker.available:
+        npm_cid = docker.find_npm_container()
+        if npm_cid:
+            npm_info = docker.inspect(npm_cid)
+            if npm_info and npm_info.compose_service:
+                npm_service = npm_info.compose_service
+
     if show_step1:
         print(f"  {Console.bold('1.')} Recreate NPM to load Wake-On-Request {Console.yellow('(Required ONCE)')}:")
-        print(f"     {Console.blue('docker compose up -d --force-recreate npm')}")
-        _npm_hint = Console.blue('# (use your NPM service name if different from "npm")')
-        print(f"     {_npm_hint}")
+        print(f"     {Console.blue(f'docker compose up -d --force-recreate {npm_service}')}")
         print()
 
     if show_method_a:
