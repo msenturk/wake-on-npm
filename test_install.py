@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch, call, PropertyMock
 
-import pytest
+import pytest  # type: ignore[import-not-found,import-untyped]
 
 # Ensure we can import install.py from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
@@ -131,7 +131,7 @@ def sample_container_json():
 
 class TestConsole:
     def test_ok_prints_green(self, capsys):
-        with patch.object(I.Console, "_enabled", True):
+        with patch("sys.stdout.isatty", return_value=True):
             I.Console.ok("All good")
         out = capsys.readouterr().out
         assert "All good" in out
@@ -173,30 +173,30 @@ class TestConsole:
         assert "═" in out
 
     def test_no_ansi_when_not_tty(self, capsys):
-        with patch.object(I.Console, "_enabled", False):
+        with patch("sys.stdout.isatty", return_value=False):
             result = I.Console.green("hello")
         assert result == "hello"
         assert "\033" not in result
 
     def test_ansi_when_tty(self):
-        with patch.object(I.Console, "_enabled", True):
+        with patch("sys.stdout.isatty", return_value=True):
             result = I.Console.green("hello")
         assert "\033[0;32m" in result
 
     def test_bold(self):
-        with patch.object(I.Console, "_enabled", False):
+        with patch("sys.stdout.isatty", return_value=False):
             assert I.Console.bold("x") == "x"
 
     def test_yellow(self):
-        with patch.object(I.Console, "_enabled", False):
+        with patch("sys.stdout.isatty", return_value=False):
             assert I.Console.yellow("x") == "x"
 
     def test_red(self):
-        with patch.object(I.Console, "_enabled", False):
+        with patch("sys.stdout.isatty", return_value=False):
             assert I.Console.red("x") == "x"
 
     def test_blue(self):
-        with patch.object(I.Console, "_enabled", False):
+        with patch("sys.stdout.isatty", return_value=False):
             assert I.Console.blue("x") == "x"
 
 
@@ -767,7 +767,7 @@ class TestNpmDatabase:
         assert "run" in call_args
         assert "--rm" in call_args
         assert "--volumes-from" in call_args
-        assert "alpine:3.20" in call_args
+        assert "--network" in call_args
         assert len(rows) == 1
         assert rows[0] == ('["app.example.com"]', "myapp", "8080")
 
@@ -1038,7 +1038,9 @@ class TestUtilities:
         assert re.match(r"\d+\.\d+\.\d+\.\d+", ip)
 
     def test_detect_host_ip_fallback(self):
-        with patch("socket.socket") as mock_sock:
+        with patch("socket.socket") as mock_sock, \
+             patch.dict("sys.modules", {"netifaces": None}), \
+             patch("socket.getaddrinfo", side_effect=Exception):
             mock_sock.return_value.__enter__.return_value.connect.side_effect = Exception
             mock_sock.return_value.__enter__.return_value.getsockname.side_effect = Exception
             with patch("subprocess.run") as mock_run:
@@ -1047,7 +1049,9 @@ class TestUtilities:
         assert ip  # Should return something
 
     def test_detect_host_ip_all_fail(self):
-        with patch("socket.socket") as mock_sock:
+        with patch("socket.socket") as mock_sock, \
+             patch.dict("sys.modules", {"netifaces": None}), \
+             patch("socket.getaddrinfo", side_effect=Exception):
             mock_sock.return_value.__enter__.return_value.connect.side_effect = Exception
             with patch("subprocess.run", side_effect=Exception):
                 ip = I._detect_host_ip()
